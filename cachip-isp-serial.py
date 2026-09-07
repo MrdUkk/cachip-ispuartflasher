@@ -1,20 +1,22 @@
 # not so perfect and ideal but working ISP-mode via
-# any USB-UART bridge firmwares uploader to CACHIP MCUs
-# this work was based on long research maded by two people *
+# any USB-UART bridge firmwares uploader to any CACHIP (Jinrui) 8bit MCUs
+# this work was based on long research maded by those two people
 # dUkk and Mikhailow Alexander
-# without its finding no tool would exists. So give them some shouts! :)
+# without theirs finding no tool would exists. So give them some shouts! :)
 #
 #
 # to use it you must:
-# 1. drink some beer
-# 2. obtain bootloader.bin (that file was from original Jinrui flasher)
-# 3. prepare your firmware.bin from compiled by some 8051 compiler code or download it from MCU :)
-# 4. be careful and do it at your risk!
+# 1. purchase USB-UART bridge (if you dont own it already)
+# 2. drink some beer (mandatory requirement)
+# 3. obtain bootloader.bin somehow
+# 4. prepare your firmware.bin from compiled by some 8051 compiler code or download it from MCU :)
+# 5. be very careful and do all at your risk!
+#
 # hand written (c) dUkk 2026 https://blog.softdev.online
 
 import serial
 import time
-import struct
+import math
 import base64
 import sys
 import os
@@ -39,7 +41,7 @@ def send_to_mcu(data: bytes):
     ispport.write(byte_buffer)
 
 def read_from_mcu(len: int, timeout: int):
-    # incremet for full protocol frame
+    # increment for full protocol frame
     len += 3
     for i in range(timeout):
         if ispport.in_waiting >= len:
@@ -68,6 +70,9 @@ def read_from_mcu_data():
         time.sleep(0.01)
     
     print(len(byte_buffer))
+    if len(byte_buffer) < 1:
+       return bytearray()
+
     # parse frame data
     if byte_buffer[0] != 0xAA:
        return bytearray()
@@ -83,39 +88,50 @@ def read_from_mcu_data():
 
 
 # Check if an argument was passed
-if len(sys.argv) < 4:
-    print("No arguments provided! use {0} port action chipid".format(sys.argv[0]))
+if len(sys.argv) < 3:
+    print("invalid number of arguments provided! use {0} port action chipid".format(sys.argv[0]))
     print("port       - serial port name")
-    print("action     - verify , upload , download . filename used will be hardcoded firmware.bin")
+    print("action     - verify , upload , download, erase , chipid . filename used will be hardcoded firmware.bin")
     print("chipid     - chip identification string in HEX")
     print("size       - optional argument. specify size of data to download from mcu")
     exit(1)
     
-do_verify=False
-do_upload=False
-do_download=False
+actionToDo=0
 if sys.argv[2].lower() == "verify":
-   do_verify=True
+   if len(sys.argv) < 4:
+      print("chipid was not specified")
+      exit(1)
+   actionToDo=1
 elif sys.argv[2].lower() == "upload":
-   do_upload=True
+   if len(sys.argv) < 4:
+      print("chipid was not specified")
+      exit(1)
+   actionToDo=2
 elif sys.argv[2].lower() == "download":
-   do_download=True
+   if len(sys.argv) < 4:
+      print("chipid was not specified")
+      exit(1)
+   if len(sys.argv) != 5:
+      print("size in bytes of memory to read was not specified (last argument)")
+      exit(1)
+   memsize = int(sys.argv[4])   
+   actionToDo=3
+elif sys.argv[2].lower() == "erase":
+   if len(sys.argv) < 4:
+      print("chipid was not specified")
+      exit(1)
+   actionToDo=4
+elif sys.argv[2].lower() == "chipid":
+   actionToDo=5   
 else:
    print("unknown action specified")
    exit(1)
 
-if do_download:
-   if len(sys.argv) != 5:
-      print("size in bytes of memory to read was not specified (last argument)")
+if actionToDo != 5:
+   chipid = bytearray.fromhex(sys.argv[3])
+   if len(chipid) != 2:
+      print("invalid chip identification string specified (two bytes, hex string)")
       exit(1)
-   memsize = int(sys.argv[4])
-
-chipid = bytearray.fromhex(sys.argv[3])
-if len(chipid) != 3:
-   print("invalid chip identification string specified")
-   print("known ids:")
-   print("20A001  = CA51F253L3")
-   exit(1)
 
 print("checking for a required phase1 bootloader")
 if not os.path.isfile("bootloader.bin"):
@@ -130,11 +146,10 @@ if not os.path.isfile("bootloader.bin"):
 print(f"opening serial port {sys.argv[1]}")
 ispport = serial.Serial(port=sys.argv[1], timeout=1, baudrate=1200, bytesize=8, parity=serial.PARITY_NONE, stopbits=1, xonxoff=0, rtscts=0)
 okay=False
-print(f"using target MCU chipid {chipid.hex()}")
 
 # phase1
 # try ISP activation magic sequence for 4seconds (Vcc should be ON)
-print("trying ISP-mode activation, waiting 3seconds (feed +3.3V power to MCU !)")
+print("trying ISP-mode activation, waiting 4 seconds (feed +3.3V power to MCU !)")
 for i in range(400):
     ispport.write(b"\xC1\x83\x07")
     #try read ACK
@@ -193,10 +208,10 @@ if okay:
 
 # phase4
 # something like checking chipid before uploading
-if okay:
+if okay and actionToDo != 5:
    print("requesting verify chipID for next phases")
    okay=False
-   send_to_mcu(b"\x04" + chipid)
+   send_to_mcu(b"\x04" + chipid + b"\x01")
    data = read_from_mcu(3, 100)
    idx = data.find(b"\x80\x00\x00")
    if idx != -1:
@@ -246,10 +261,10 @@ if okay:
 
 # phase6
 # verify chipid (authorization?)
-if okay:
+if okay and actionToDo != 5:
    print("requesting access to flash with designated chipID")
    okay=False
-   send_to_mcu(b"\x18" + chipid)
+   send_to_mcu(b"\x18" + chipid + b"\x01")
    data = read_from_mcu(3, 100)
    idx = data.find(b"\x80\x00\x00")
    if idx != -1:
@@ -264,7 +279,7 @@ if okay:
 # phase7 is select between 3 allowed actions
 if okay:
    okay=False
-   if do_verify:
+   if actionToDo == 1:
       print("requesting to do flash firmware verification with our local firmware.bin file")
       chksum = int.from_bytes(b"\x00\x00\xAD\x75", byteorder="big", signed=False)
       file = open("firmware.bin", "rb")
@@ -295,37 +310,49 @@ if okay:
             # search for our checksum
             idx = data.find(chksum.to_bytes(4, byteorder='big', signed=False))
             if idx != -1:
-               print("verification is success")
+               print("verification is success {0}".format(chksum.to_bytes(4, byteorder='big', signed=False).hex()))
                okay=True
-   elif do_upload:
-      print("requesting onchip flash memory partial erase")
-      send_to_mcu(b"\x05\x28\x45\x00\xAE")
-      time.sleep(0.900)
-      data = read_from_mcu(3, 200)
-      idx = data.find(b"\x80\x00\x00")
-      if idx != -1:
-         print("got mcu success response")
+            else:
+               print("checksum verification was failed! value {0} not expected".format(data.hex()))
+   elif actionToDo == 2:
+      filesize = os.path.getsize("firmware.bin")
+      if filesize <= 32000:
          okay=True
       else:
-         idx = data.find(b"x80\x01\x00")
+         print("too large firmware size to upload")
+      
+      if okay:
+         okay=False
+         # determine how much sectors will be occupied by firmware?
+         sectorscount = math.ceil(filesize / 128)
+         print(f"requesting onchip flash memory partial {sectorscount} sectors erase")
+         send_to_mcu(b"\x05\x28\x45\x00" + sectorscount.to_bytes(1, byteorder='big', signed=False))
+         # give MCU bunch of time to perform this long operation
+         time.sleep(0.400)
+         data = read_from_mcu(3, 900)
+         idx = data.find(b"\x80\x00\x00")
          if idx != -1:
-            print("got mcu error response")
+            print("got mcu success response")
+            okay=True
+         else:
+            idx = data.find(b"x80\x01\x00")
+            if idx != -1:
+               print("got mcu error response")
       
       if okay:
          okay=False
          print("uploading from firmware.bin to onchip memory")
          file = open("firmware.bin", "rb")
          addrofwrite = 0
+         byte_buffer = bytearray()
          while True:
              chunk = file.read(128)
              if not chunk:
                 break
-             byte_buffer = bytearray()
              # cmd write received to flash location
              byte_buffer.extend(b"\x06\x28\x00")
              # address of write target (2bytes)
              byte_buffer.extend(addrofwrite.to_bytes(2, byteorder='big', signed=False))
-             addrofwrite += len(chunk)
              # trailing
              byte_buffer.extend(b"\x80")
              # body
@@ -336,20 +363,22 @@ if okay:
              data = read_from_mcu(3, 100)
              idx = data.find(b"\x80\x00\x00")
              if idx != -1:
-                print("got mcu success response")
+                print("got mcu success response write at {0}".format(addrofwrite))
                 okay=True
              else:
                 idx = data.find(b"\x80\x01\x00")
                 if idx != -1:
                    print("got mcu error response")
                 break
+             byte_buffer.clear()
+             addrofwrite += len(chunk)
          file.close()
-   elif do_download:
-      print("requesting onchip flash memory read with size {0}".format(memsize))
+   elif actionToDo == 3:
+      print("requesting onchip flash memory read with size {0} to firmware.bin".format(memsize))
       file = open("firmware.bin", "wb")
       addrofread = 0
       byte_buffer = bytearray()
-      while addrofread <= memsize:
+      while addrofread < memsize:
           # cmd read onchip memory
           byte_buffer.extend(b"\x08\x28\x00")
           # address where to read from (2bytes)
@@ -361,7 +390,7 @@ if okay:
           # readback data
           byte_buffer = read_from_mcu_data()
           if len(byte_buffer) > 5:
-             print("frame is valid, writing to file {0} bytes".format(len(byte_buffer)-5))
+             print("frame is valid, data at {0} writing to file {1} bytes".format(addrofread, len(byte_buffer)-5))
              # remove header
              del byte_buffer[:5]
              file.write(byte_buffer)
@@ -371,7 +400,50 @@ if okay:
           byte_buffer.clear()
           addrofread += 128
       file.close()
-
+   elif actionToDo == 4:
+      print(f"requesting onchip flash memory FULL erase")
+      send_to_mcu(b"\x05\x28\x45\x01\x00")
+      # give MCU bunch of time to perform this long operation
+      time.sleep(0.400)
+      data = read_from_mcu(3, 900)
+      idx = data.find(b"\x80\x00\x00")
+      if idx != -1:
+         print("got mcu success response")
+         okay=True
+      else:
+         idx = data.find(b"x80\x01\x00")
+         if idx != -1:
+            print("got mcu error response")
+   elif actionToDo == 5:
+      print("requesting onchip private area memory download to 2bareadump.bin")
+      file = open("2bareadump.bin", "wb")
+      addrofread = 0
+      memsize = 256
+      byte_buffer = bytearray()
+      while addrofread < memsize:
+          # cmd read onchip memory
+          byte_buffer.extend(b"\x08\x2B\x00")
+          # address where to read from (2bytes)
+          byte_buffer.extend(addrofread.to_bytes(2, byteorder='big', signed=False))
+          # read size is 128bytes
+          byte_buffer.extend(b"\x80")
+          # send to mcu
+          send_to_mcu(byte_buffer)
+          # readback data
+          byte_buffer = read_from_mcu_data()
+          if len(byte_buffer) > 5:
+             print("frame is valid, data at {0} writing to file {1} bytes".format(addrofread, len(byte_buffer)-5))
+             # remove header
+             del byte_buffer[:5]
+             file.write(byte_buffer)
+          else:
+             print(f"frame invalid and discarded. read break at {addrofread}")
+             break
+          byte_buffer.clear()
+          addrofread += 128
+      file.close()
+      
+      
 # something like a finish session
 print("sending session end cmd")
 send_to_mcu(b"\x07")
